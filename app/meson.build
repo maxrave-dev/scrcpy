@@ -269,6 +269,9 @@ endif
 # do not build tests in release (assertions would not be executed at all)
 if get_option('buildtype') == 'debug'
     tests = [
+        ['test_window_geometry', [
+            'tests/test_window_geometry.c',
+        ]],
         ['test_adb_parser', [
             'tests/test_adb_parser.c',
             'src/adb/adb_device.c',
@@ -334,9 +337,13 @@ if get_option('buildtype') == 'debug'
 
     foreach t : tests
         sources = t[1] + ['src/compat.c']
+        test_dependencies = dependencies
+        if t[0] == 'test_window_geometry'
+            test_dependencies += cc.find_library('m', required: false)
+        endif
         exe = executable(t[0], sources,
                          include_directories: src_dir,
-                         dependencies: dependencies,
+                         dependencies: test_dependencies,
                          c_args: ['-DSC_TEST'])
         test(t[0], exe)
     endforeach

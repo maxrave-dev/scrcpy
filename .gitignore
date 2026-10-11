@@ -8,3 +8,9 @@ build/
 /x/
 local.properties
 /scrcpy-server
+
+# Native macOS build products and local Xcode state
+/macos/TermLogCore/target/
+/macos/ScrcpyMac.xcodeproj/xcuserdata/
+**/*.xcuserstate
+/.omc/

@@ -1,6 +1,8 @@
 #include "screen.h"
 
 #include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <SDL3/SDL.h>
 
@@ -11,6 +13,11 @@
 #include "util/sdl.h"
 
 #define DISPLAY_MARGINS 96
+
+#ifdef __APPLE__
+static void
+sc_screen_end_window_drag(struct sc_screen *screen, bool drop_release);
+#endif
 
 #define DOWNCAST(SINK) container_of(SINK, struct sc_screen, frame_sink)
 
@@ -518,6 +525,13 @@ bool
 sc_screen_init(struct sc_screen *screen,
                const struct sc_screen_params *params) {
     screen->controller = params->controller;
+#ifdef __APPLE__
+    memset(&screen->window_drag, 0, sizeof(screen->window_drag));
+    memset(&screen->auto_titlebar, 0, sizeof(screen->auto_titlebar));
+    const char *managed = getenv("SCRCPY_MAC_MANAGED");
+    screen->auto_titlebar.enabled = params->video && params->window_borderless
+                                && managed && !strcmp(managed, "1");
+#endif
 
     screen->resize_pending = false;
     screen->window_shown = false;
@@ -808,6 +822,14 @@ sc_screen_show_initial_window(struct sc_screen *screen) {
     screen->window_shown = true;
     sc_sdl_show_window(screen->window);
     sc_screen_update_content_rect(screen);
+#ifdef __APPLE__
+    if (getenv("SCRCPY_MAC_MANAGED")) {
+        // A piped stdout is block-buffered. The manager must learn readiness
+        // now, not when a later log line happens to fill the buffer.
+        LOGI("SCRCPY_MAC_WINDOW_READY");
+        fflush(stdout);
+    }
+#endif
 }
 
 void
@@ -838,6 +860,9 @@ sc_screen_join(struct sc_screen *screen) {
 
 void
 sc_screen_destroy(struct sc_screen *screen) {
+#ifdef __APPLE__
+    sc_screen_end_window_drag(screen, false);
+#endif
 #ifndef NDEBUG
     assert(!screen->open);
 #endif
@@ -1147,6 +1172,205 @@ sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
                                             content_size.height);
 }
 
+#ifdef __APPLE__
+static void
+sc_screen_end_window_drag(struct sc_screen *screen, bool drop_release) {
+    if (!screen->window_drag.active) {
+        return;
+    }
+    screen->window_drag.active = false;
+    screen->window_drag.drop_left_release = drop_release;
+    SDL_CaptureMouse(false);
+    if (screen->window_drag.cursor) {
+        SDL_SetCursor(SDL_GetDefaultCursor());
+        SDL_DestroyCursor(screen->window_drag.cursor);
+        screen->window_drag.cursor = NULL;
+    }
+}
+
+static SDL_SystemCursor
+sc_screen_drag_cursor(unsigned edges) {
+    bool horizontal = edges & (SC_WINDOW_EDGE_LEFT | SC_WINDOW_EDGE_RIGHT);
+    bool vertical = edges & (SC_WINDOW_EDGE_TOP | SC_WINDOW_EDGE_BOTTOM);
+    if (horizontal && vertical) {
+        return ((edges & SC_WINDOW_EDGE_LEFT) && (edges & SC_WINDOW_EDGE_TOP))
+            || ((edges & SC_WINDOW_EDGE_RIGHT) && (edges & SC_WINDOW_EDGE_BOTTOM))
+             ? SDL_SYSTEM_CURSOR_NWSE_RESIZE : SDL_SYSTEM_CURSOR_NESW_RESIZE;
+    }
+    return horizontal ? SDL_SYSTEM_CURSOR_EW_RESIZE : SDL_SYSTEM_CURSOR_NS_RESIZE;
+}
+
+// Consume only a gesture that began with Option + left mouse down. Starting
+// to hold Option halfway through an Android swipe must not steal that swipe.
+// SDL Cocoa hit-testing only implements dragging, not edge/corner resizing.
+static bool
+sc_screen_handle_window_drag(struct sc_screen *screen, const SDL_Event *event) {
+    if (event->type == SDL_EVENT_WINDOW_FOCUS_LOST || !is_windowed(screen)) {
+        sc_screen_end_window_drag(screen, true);
+        return false;
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP
+            && event->button.button == SDL_BUTTON_LEFT
+            && screen->window_drag.drop_left_release) {
+        screen->window_drag.drop_left_release = false;
+        return true;
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN
+            && event->button.button == SDL_BUTTON_LEFT
+            && !screen->window_drag.active) {
+        screen->window_drag.drop_left_release = false;
+        if (!screen->video || !(SDL_GetWindowFlags(screen->window)
+                               & SDL_WINDOW_BORDERLESS)
+                || sc_screen_is_relative_mode(screen)
+                || event->button.which == SDL_TOUCH_MOUSEID
+                || !(SDL_GetModState() & SDL_KMOD_ALT)) {
+            return false;
+        }
+        struct sc_window_rect *start = &screen->window_drag.start;
+        if (!SDL_GetWindowPosition(screen->window, &start->x, &start->y)
+                || !SDL_GetWindowSize(screen->window, &start->w, &start->h)) {
+            LOGW("Could not begin window drag: %s", SDL_GetError());
+            return false;
+        }
+        screen->window_drag.edges = sc_window_edges_at(event->button.x,
+                                                       event->button.y,
+                                                       start->w, start->h, 6);
+        SDL_GetGlobalMouseState(&screen->window_drag.mouse_x,
+                                &screen->window_drag.mouse_y);
+        screen->window_drag.active = true;
+        if (!SDL_CaptureMouse(true)) {
+            LOGW("Could not capture window drag: %s", SDL_GetError());
+        }
+        if (screen->window_drag.edges) {
+            screen->window_drag.cursor =
+                SDL_CreateSystemCursor(sc_screen_drag_cursor(screen->window_drag.edges));
+            if (screen->window_drag.cursor) {
+                SDL_SetCursor(screen->window_drag.cursor);
+            }
+        }
+        return true;
+    }
+    if (!screen->window_drag.active) {
+        return false;
+    }
+    if (event->type == SDL_EVENT_MOUSE_BUTTON_UP
+            && event->button.button == SDL_BUTTON_LEFT) {
+        sc_screen_end_window_drag(screen, false);
+        return true;
+    }
+    if (event->type == SDL_EVENT_MOUSE_MOTION) {
+        float x, y;
+        SDL_GetGlobalMouseState(&x, &y);
+        double dx = x - screen->window_drag.mouse_x;
+        double dy = y - screen->window_drag.mouse_y;
+        struct sc_window_rect rect = screen->window_drag.start;
+        if (screen->window_drag.edges) {
+            double aspect = screen->window_aspect_ratio_lock
+                           ? (double) screen->content_size.width
+                                    / screen->content_size.height : 0;
+            rect = sc_window_resize_rect(rect, dx, dy,
+                                         screen->window_drag.edges, aspect);
+            if (!SDL_SetWindowSize(screen->window, rect.w, rect.h)) {
+                LOGW("Could not resize borderless window: %s", SDL_GetError());
+            }
+        } else {
+            rect.x += (int) lround(dx);
+            rect.y += (int) lround(dy);
+        }
+        if (!SDL_SetWindowPosition(screen->window, rect.x, rect.y)) {
+            LOGW("Could not move borderless window: %s", SDL_GetError());
+        }
+        return true;
+    }
+    return event->type == SDL_EVENT_MOUSE_BUTTON_DOWN
+        || event->type == SDL_EVENT_MOUSE_BUTTON_UP
+        || event->type == SDL_EVENT_MOUSE_WHEEL;
+}
+#endif
+
+#ifdef __APPLE__
+static void
+sc_screen_update_titlebar(struct sc_screen *screen) {
+    uint64_t now = SDL_GetTicks();
+    if (now < screen->auto_titlebar.next_check_ms) {
+        return;
+    }
+    screen->auto_titlebar.next_check_ms = now + 50;
+    if (!screen->window_shown || !is_windowed(screen)
+            || sc_screen_is_relative_mode(screen)) {
+        screen->auto_titlebar.hover.hide_at_ms = 0;
+        return;
+    }
+
+    struct sc_window_rect content;
+    if (!SDL_GetWindowPosition(screen->window, &content.x, &content.y)
+            || !SDL_GetWindowSize(screen->window, &content.w, &content.h)) {
+        return;
+    }
+    float x, y;
+    SDL_MouseButtonFlags buttons = SDL_GetGlobalMouseState(&x, &y);
+    bool dragging = screen->window_drag.active || (buttons & SDL_BUTTON_LMASK);
+    int title_height = 28;
+    if (screen->auto_titlebar.hover.visible) {
+        int measured_height;
+        // SDL's Cocoa backend has no GetWindowBordersSize implementation;
+        // failure writes zero, so preserve the native-titlebar fallback.
+        if (SDL_GetWindowBordersSize(screen->window, &measured_height,
+                                    NULL, NULL, NULL) && measured_height > 0) {
+            title_height = measured_height;
+        }
+    }
+    bool visible = sc_window_titlebar_target(&screen->auto_titlebar.hover,
+                                             content, x, y, title_height,
+                                             dragging, now);
+    if (visible == screen->auto_titlebar.hover.visible) {
+        return;
+    }
+
+    if (!SDL_SetWindowBordered(screen->window, visible)) {
+        LOGW("Could not toggle native titlebar: %s", SDL_GetError());
+        screen->auto_titlebar.enabled = false;
+        return;
+    }
+    screen->auto_titlebar.hover.visible = visible;
+    // Cocoa setStyleMask can change the content rectangle. Restore content
+    // size and position, not the outer frame (which now includes the bar).
+    bool restored = SDL_SetWindowSize(screen->window, content.w, content.h);
+    restored &= SDL_SetWindowPosition(screen->window, content.x, content.y);
+    if (!restored) {
+        LOGW("Could not preserve content rectangle: %s", SDL_GetError());
+        screen->auto_titlebar.enabled = false;
+    }
+    sc_screen_update_content_rect(screen);
+    sc_screen_render(screen, true);
+}
+#endif
+
+bool
+sc_screen_wait_event(struct sc_screen *screen, SDL_Event *event) {
+#ifdef __APPLE__
+    while (screen->auto_titlebar.enabled) {
+        sc_screen_update_titlebar(screen);
+        if (!screen->auto_titlebar.enabled) {
+            break;
+        }
+        // Mouse motion over native chrome or outside the window need not
+        // produce an SDL event. A bounded wait keeps hover/hide working.
+        SDL_ClearError();
+        if (SDL_WaitEventTimeout(event, 50)) {
+            return true;
+        }
+        if (*SDL_GetError()) {
+            LOGE("SDL_WaitEventTimeout() error: %s", SDL_GetError());
+            return false;
+        }
+    }
+#else
+    (void) screen;
+#endif
+    return SDL_WaitEvent(event);
+}
+
 static void
 sc_disconnect_on_icon_loaded(struct sc_disconnect *d, SDL_Surface *icon,
                              void *userdata) {
@@ -1170,6 +1394,11 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+#ifdef __APPLE__
+    if (sc_screen_handle_window_drag(screen, event)) {
+        return;
+    }
+#endif
     switch (event->type) {
         case SC_EVENT_OPEN_WINDOW: {
             struct sc_size *size = event->user.data1;
@@ -1273,7 +1502,7 @@ sc_screen_handle_disconnection(struct sc_screen *screen) {
     }
 
     SDL_Event event;
-    while (SDL_WaitEvent(&event)) {
+    while (sc_screen_wait_event(screen, &event)) {
         switch (event.type) {
             case SDL_EVENT_WINDOW_EXPOSED:
                 sc_screen_render(screen, true);

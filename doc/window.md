@@ -64,6 +64,10 @@ To disable window decorations:
 scrcpy --window-borderless
 ```
 
+On macOS, hold **Option** and drag with the left mouse button to move a borderless window. Hold **Option** and drag within 6 window-coordinate points of an edge or corner to resize it. The existing aspect-ratio lock is preserved. Ordinary mouse input is still forwarded to Android; fullscreen and relative-mouse mode do not intercept these gestures.
+
+The [native macOS app](../macos/README.md) additionally reveals the real titlebar when the pointer approaches the top 20-point band of a managed mirror. Moving away from the 60-point retain band hides it after 300 ms; the bar stays visible during dragging. Hovering the rest of the Android screen does not reveal it. This does not change standalone CLI borderless windows.
+
 ## Always on top
 
 To keep the window always on top:

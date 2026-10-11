@@ -25,6 +25,10 @@
 #include "util/thread.h"
 
 #ifdef __APPLE__
+# include "util/window_geometry.h"
+#endif
+
+#ifdef __APPLE__
 # define SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
 #endif
 
@@ -70,6 +74,21 @@ struct sc_screen {
 
     SDL_Window *window;
     SDL_Renderer *renderer;
+#ifdef __APPLE__
+    struct {
+        bool active;
+        bool drop_left_release;
+        unsigned edges;
+        float mouse_x, mouse_y;
+        struct sc_window_rect start;
+        SDL_Cursor *cursor;
+    } window_drag;
+    struct {
+        bool enabled;
+        uint64_t next_check_ms;
+        struct sc_window_titlebar_state hover;
+    } auto_titlebar;
+#endif
 #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
     SDL_GLContext gl_context;
 #endif
@@ -196,6 +215,11 @@ sc_screen_set_orientation(struct sc_screen *screen,
 // set the display pause state
 void
 sc_screen_set_paused(struct sc_screen *screen, bool paused);
+
+// Wait on the main thread, servicing managed macOS titlebar hover even if
+// no video or mouse event is arriving. Other windows retain SDL_WaitEvent.
+bool
+sc_screen_wait_event(struct sc_screen *screen, SDL_Event *event);
 
 // react to SDL events
 void
