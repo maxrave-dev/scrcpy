@@ -35,6 +35,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if !restored { window.center() }
         manager = window
         showManager()
+        // A device back after a dropped connection gets its mirror reopened and its Logcat restarted.
+        sessions.devices = devices
+        devices.onReconnect = { [weak self] serial in self?.logcatStore?.restart(serial: serial) }
         devices.start()
     }
 

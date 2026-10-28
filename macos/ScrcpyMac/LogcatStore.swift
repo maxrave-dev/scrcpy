@@ -183,6 +183,8 @@ final class LogcatStore {
     func applyQuery(_ value: String? = nil) { if let value { query = value }; send("query", ["query": query]) }
     func chooseTab(_ index: Int) { pageOffset = nil; send("tab", ["index": index]) }
     func chooseDevice(_ serial: String) { pageOffset = nil; send("device", ["serial": serial]) }
+    /// Resumes collection after the shown device reconnected.
+    func restart(serial: String) { if snapshot?.serial == serial { send("restart") } }
     func pause() { if let snapshot { send("pause", ["paused": !snapshot.paused]) } }
     func follow() { pageOffset = nil; send("follow", ["follow": true]) }
     func select(_ row: LogcatRow, copy: Bool = false) { send(copy ? "copy" : "select", ["seq": row.seq]) }

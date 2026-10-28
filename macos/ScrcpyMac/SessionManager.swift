@@ -5,29 +5,39 @@ import Observation
 @MainActor @Observable
 final class MirrorSession: Identifiable {
     enum Phase: Equatable {
-        case starting, running, stopping, failed(String)
+        case starting, running, reconnecting, stopping, failed(String)
         var isActive: Bool {
-            switch self { case .starting, .running, .stopping: return true; case .failed: return false }
+            switch self { case .starting, .running, .reconnecting, .stopping: return true; case .failed: return false }
         }
         var label: String {
-            switch self { case .starting: return "Opening…"; case .running: return "Mirroring"; case .stopping: return "Stopping…"; case .failed(let message): return message }
+            switch self {
+            case .starting: return "Opening…"
+            case .running: return "Mirroring"
+            case .reconnecting: return "Connection lost. The mirror reopens once the device is back."
+            case .stopping: return "Stopping…"
+            case .failed(let message): return message
+            }
         }
     }
     let id = UUID()
     let serial: String
     let job: ProcessJob
+    let options: MirrorOptions
     var phase: Phase = .starting
     @ObservationIgnored var task: Task<Void, Never>?
     @ObservationIgnored var deadline: Task<Void, Never>?
+    @ObservationIgnored var restoration: Task<Void, Never>?
     @ObservationIgnored var lines = LineBuffer()
     @ObservationIgnored var lastError: String?
-    init(serial: String, job: ProcessJob) { self.serial = serial; self.job = job }
+    init(serial: String, job: ProcessJob, options: MirrorOptions) { self.serial = serial; self.job = job; self.options = options }
 }
 
 @MainActor @Observable
 final class SessionManager {
     private(set) var sessions: [String: MirrorSession] = [:]
     private(set) var error: String?
+    /// Reconnects a device whose running mirror died, so the mirror can reopen.
+    @ObservationIgnored weak var devices: DeviceStore?
     var activeCount: Int { sessions.values.filter { $0.phase.isActive }.count }
 
     func open(_ device: AndroidDevice, options: MirrorOptions) {
@@ -36,7 +46,7 @@ final class SessionManager {
         do {
             let paths = try EnginePaths.resolve()
             let job = ProcessJob(executable: paths.scrcpy, arguments: options.arguments(serial: device.serial, name: device.name), environment: paths.environment)
-            let session = MirrorSession(serial: device.serial, job: job)
+            let session = MirrorSession(serial: device.serial, job: job, options: options)
             sessions[device.serial] = session
             error = nil
             session.task = Task { [weak self, weak session] in
@@ -55,7 +65,13 @@ final class SessionManager {
                         }
                     }
                     guard sessions[device.serial]?.id == session.id else { return }
-                    if result.status == 0 { sessions.removeValue(forKey: device.serial) }
+                    // scrcpy also exits 2 when the window is closed while it shows its disconnected icon.
+                    let userQuit = result.output.contains("User requested to quit")
+                    if result.status == 0 || userQuit { sessions.removeValue(forKey: device.serial) }
+                    // Only "device disconnected" (exit 2) reopens a mirror that was showing: a crash,
+                    // a kill or a decoder error (exit 1) would otherwise reopen it in a loop.
+                    else if result.status == 2, !result.signaled, session.phase == .running, devices != nil { restore(session, device: device) }
+                    else if result.signaled { session.phase = .failed("The mirror process ended unexpectedly (signal \(result.status)).") }
                     else { session.phase = .failed(session.lastError ?? result.output.trimmingCharacters(in: .whitespacesAndNewlines).suffix(1200).description) }
                 } catch is CancellationError {
                     if sessions[device.serial]?.id == session.id { sessions.removeValue(forKey: device.serial) }
@@ -71,6 +87,29 @@ final class SessionManager {
         } catch { self.error = error.localizedDescription }
     }
 
+    /// Waits for DeviceStore to get the device back (2, 4 and 8 s attempts), then reopens the
+    /// mirror with the options it had. Stop cancels the wait.
+    private func restore(_ session: MirrorSession, device: AndroidDevice) {
+        guard let devices else { return }
+        session.phase = .reconnecting
+        session.restoration = Task { [weak self, weak session] in
+            let back = await devices.reconnect(device)
+            guard let self, let session, !Task.isCancelled, sessions[device.serial]?.id == session.id else { return }
+            if back, let ready = devices.devices.first(where: { $0.serial == device.serial && $0.isReady }) {
+                sessions.removeValue(forKey: device.serial)
+                open(ready, options: session.options)
+            } else {
+                session.phase = .failed("Mirror stopped: the connection was lost and \(device.name) did not come back.")
+            }
+        }
+    }
+
+    /// Reconnect after a failed restore: waits for the device again, then reopens the mirror.
+    func retry(_ device: AndroidDevice) {
+        guard let session = sessions[device.serial], !session.phase.isActive else { return }
+        restore(session, device: device)
+    }
+
     func show(_ serial: String) {
         guard let session = sessions[serial], let pid = session.job.pid, let application = NSRunningApplication(processIdentifier: pid) else { return }
         if !application.activate(options: [.activateAllWindows]) { error = "macOS could not focus the mirror window" }
@@ -79,6 +118,8 @@ final class SessionManager {
     func stop(_ serial: String) {
         guard let session = sessions[serial] else { return }
         if !session.phase.isActive { sessions.removeValue(forKey: serial); return }
+        // No process is left while waiting to reconnect; only the wait is cancelled.
+        if session.phase == .reconnecting { session.restoration?.cancel(); sessions.removeValue(forKey: serial); return }
         session.phase = .stopping
         session.deadline?.cancel()
         session.task?.cancel()
