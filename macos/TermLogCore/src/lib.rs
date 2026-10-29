@@ -92,6 +92,9 @@ fn validate_settings(config: &config::Config) -> Result<(), String> {
 }
 
 fn dispatch(app: &mut App, request: &Value) -> Result<Value, String> {
+    if let Some(serial) = request["expected_serial"].as_str() {
+        if serial != app.serial { return Err("Logcat changed device; select the intended device explicitly".into()); }
+    }
     app.pump();
     app.tick();
     let action = request["action"].as_str().unwrap_or("snapshot");

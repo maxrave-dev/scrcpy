@@ -110,9 +110,12 @@ final class SessionManager {
         restore(session, device: device)
     }
 
-    func show(_ serial: String) {
-        guard let session = sessions[serial], let pid = session.job.pid, let application = NSRunningApplication(processIdentifier: pid) else { return }
-        if !application.activate(options: [.activateAllWindows]) { error = "macOS could not focus the mirror window" }
+    @discardableResult
+    func show(_ serial: String) -> Bool {
+        guard let session = sessions[serial], let pid = session.job.pid, let application = NSRunningApplication(processIdentifier: pid) else { error = "Mirror window is not available"; return false }
+        guard application.activate(options: [.activateAllWindows]) else { error = "macOS could not focus the mirror window"; return false }
+        error = nil
+        return true
     }
 
     func stop(_ serial: String) {

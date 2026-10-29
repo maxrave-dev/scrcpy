@@ -138,7 +138,7 @@ final class ProcessJob: @unchecked Sendable {
 }
 
 /// Exit status delivered by Process.terminationHandler.
-private final class Termination: @unchecked Sendable {
+final class Termination: @unchecked Sendable {
     private let signal = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var status: Int32?

@@ -66,7 +66,6 @@ struct ManagerView: View {
     private struct Notice: Equatable { let id = UUID(); let text: String; var failure = false }
     @State private var notice: Notice?
     @State private var manualRefresh = false
-    @State private var unlockTarget: AndroidDevice?
     private var options: MirrorOptions { MirrorOptions(maxSize: maxSize, audio: audio, onTop: onTop) }
 
     var body: some View {
@@ -129,7 +128,7 @@ struct ManagerView: View {
         }.padding(28).foregroundStyle(palette.ink).background(palette.background).accentColor(palette.ink)
             // Closing the sheet any way, including Esc, cancels a running connection.
             .sheet(isPresented: $wifiPresented, onDismiss: { devices.cancelConnect(); devices.clearConnectStatus() }) { wifiSheet(palette) }
-            .sheet(item: $unlockTarget) { device in UnlockSheet(device: device, devices: devices) { notice = Notice(text: $0) } }
+            .sheet(item: $devices.unlockTarget) { device in UnlockSheet(device: device, devices: devices) { notice = Notice(text: $0) } }
             .onChange(of: devices.connectStatus) { _, status in
                 guard case .connected(let target) = status else { return }
                 notice = Notice(text: "Connected to \(target)")
@@ -206,7 +205,7 @@ struct ManagerView: View {
     /// volume pills were, so the row's IP stays readable at the default window width.
     private func deviceKeys(_ device: AndroidDevice, palette: AppPalette) -> some View {
         HStack(spacing: 0) {
-            Button("Unlock") { unlockTarget = device }.help("Wake the screen and enter the PIN")
+            Button("Unlock") { devices.unlockTarget = device }.help("Wake the screen and enter the PIN")
             Rectangle().fill(palette.line).frame(width: 1, height: 16)
             Button(action: { lock(device) }) { Image(systemName: "lock.fill") }.help("Lock (turn the screen off)").accessibilityLabel("Lock")
             Rectangle().fill(palette.line).frame(width: 1, height: 16)

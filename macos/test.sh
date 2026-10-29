@@ -19,6 +19,8 @@ swiftc "${ARGS[@]}" macos/ScrcpyMac/{Models,LogcatStore}.swift macos/ScrcpyMacTe
 "$WORK/bridge"
 swiftc "${ARGS[@]}" macos/ScrcpyMac/{Models,ProcessJob,DeviceStore,SessionManager,ManagerView,LogcatStore,LogcatView,LogcatTable}.swift macos/ScrcpyMacTests/ColorTests.swift -o "$WORK/colors"
 "$WORK/colors"
+swiftc "${ARGS[@]}" macos/ScrcpyMac/{Models,ProcessJob,DeviceStore,SessionManager,LogcatStore,MCP,MCPTransport,ADBProcess,ADBTools,AppTools}.swift macos/ScrcpyMacTests/MCPTests.swift -o "$WORK/mcp"
+"$WORK/mcp"
 swiftc -typecheck -swift-version 5 -import-objc-header macos/TermLogCore/termlog.h macos/ScrcpyMac/*.swift
 swiftc "${ARGS[@]}" macos/ScrcpyMac/*.swift -o "$WORK/native-link-check"
 echo "PASS: native app compile/link; no app launched and no real ADB used"

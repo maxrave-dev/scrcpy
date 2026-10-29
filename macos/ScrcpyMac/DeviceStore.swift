@@ -10,6 +10,8 @@ final class DeviceStore {
     private(set) var devices: [AndroidDevice] = []
     private(set) var error: String?
     private(set) var refreshing = false
+    // Shared with the existing manager sheet; MCP never receives a PIN.
+    var unlockTarget: AndroidDevice?
     // Kept apart from `error`, which every 3-second poll clears.
     private(set) var connectStatus = ConnectStatus.idle
     var connecting: Bool {
@@ -17,7 +19,8 @@ final class DeviceStore {
         return false
     }
     @ObservationIgnored private var poll: Task<Void, Never>?
-    @ObservationIgnored private var connection: Task<Void, Never>?
+    @ObservationIgnored private var connection: Task<ConnectStatus, Never>?
+    @ObservationIgnored private var lastConnectResult = ConnectStatus.idle
     @ObservationIgnored private var refreshAgain = false
     @ObservationIgnored private var refreshWaiters: [CheckedContinuation<Bool, Never>] = []
     @ObservationIgnored private var transports: [String: String] = [:]
@@ -106,11 +109,11 @@ final class DeviceStore {
     func connect(address input: String) {
         guard !connecting else { return }
         let address = DeviceAddress.normalized(input)
-        guard DeviceAddress.isValid(address) else { connectStatus = .failed("Enter the IP address and port from Wireless debugging, such as 192.168.1.20:37001."); return }
+        guard DeviceAddress.isValid(address) else { connectStatus = .failed("Enter the IP address and port from Wireless debugging, such as 192.168.1.20:37001."); lastConnectResult = connectStatus; return }
         connectStatus = .connecting(address)
         connection = Task { [weak self] in
-            guard let self else { return }
-            defer { connection = nil }
+            guard let self else { return .idle }
+            defer { lastConnectResult = connectStatus; connection = nil }
             do {
                 let paths = try EnginePaths.resolve()
                 let result = try await ProcessJob(executable: paths.adb, arguments: ["connect", address], environment: paths.environment, timeout: 15).run()
@@ -123,10 +126,17 @@ final class DeviceStore {
             } catch is CancellationError {
                 connectStatus = .idle
             } catch { connectStatus = .failed(error.localizedDescription) }
+            return connectStatus
         }
     }
 
     func cancelConnect() { connection?.cancel() }
+
+    /// The UI clears connectStatus after showing its success banner; retain the actual outcome.
+    func finishConnect() async -> ConnectStatus {
+        if let connection { return await connection.value }
+        return lastConnectResult
+    }
 
     func clearConnectStatus() { if !connecting { connectStatus = .idle } }
 

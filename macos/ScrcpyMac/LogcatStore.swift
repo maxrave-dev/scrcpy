@@ -67,7 +67,7 @@ private final class LogcatWorker: @unchecked Sendable {
         do {
             let data = try JSONSerialization.data(withJSONObject: value)
             queue.async { [self] in
-                guard !closed, let handle else { return }
+                guard !closed, let handle else { completion(.failure(AppFailure("Logcat is closed"))); return }
                 let response = String(decoding: data, as: UTF8.self).withCString { termlog_request(handle, $0) }
                 guard let response else { completion(.failure(AppFailure("Logcat returned no response"))); return }
                 defer { termlog_free_string(response) }
@@ -111,6 +111,10 @@ final class LogcatStore {
     @ObservationIgnored private var closed = false
     @ObservationIgnored private var snapshotPending = false
     @ObservationIgnored private var pageOffset: Int?
+    @ObservationIgnored var copyMessage: (String) -> Void = { message in
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message, forType: .string)
+    }
 
     init(serial: String) {
         worker.open(serial: serial) { [weak self] result in
@@ -162,6 +166,19 @@ final class LogcatStore {
         }
     }
 
+    /// MCP and the GUI use one serialized Rust handle, not independent log collectors.
+    func perform(_ value: [String: Any]) async throws -> [String: Any] {
+        guard !closed else { throw AppFailure("Logcat is closed") }
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            worker.request(value) { continuation.resume(with: $0) }
+        }
+        guard !closed else { throw AppFailure("Logcat closed while the request was running") }
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        if let error = object["error"] as? String { throw AppFailure(error) }
+        receive(.success(data))
+        return object
+    }
+
     private func receive(_ result: Result<Data, Error>) {
         do {
             let data = try result.get()
@@ -174,8 +191,7 @@ final class LogcatStore {
             if changedTab { query = value.tabs[value.active].query; pageOffset = nil }
             error = nil
             if let copied = object?["copied"] as? String {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(copied, forType: .string)
+                copyMessage(copied)
             }
         } catch { self.error = error.localizedDescription }
     }
